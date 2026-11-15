@@ -8,6 +8,12 @@ class PreflightTests(unittest.TestCase):
  def test_dns_matches_target(self):
   r=self.bash("getent(){ printf '37.32.24.138 STREAM target\\n37.32.24.138 DGRAM target\\n'; }; check_dns")
   self.assertEqual(r.returncode,0,r.stderr)
+ def test_ubuntu_2604_is_supported(self):
+  r=self.bash('supported_os ubuntu 26.04')
+  self.assertEqual(r.returncode,0,r.stderr)
+ def test_unsupported_os_is_rejected(self):
+  r=self.bash('supported_os centos 7')
+  self.assertNotEqual(r.returncode,0)
  def test_dns_wrong_target_or_cdn_stops(self):
   r=self.bash("getent(){ printf '192.0.2.1 STREAM proxy\\n'; }; check_dns")
   self.assertNotEqual(r.returncode,0);self.assertIn('Cloudflare A record',r.stderr)

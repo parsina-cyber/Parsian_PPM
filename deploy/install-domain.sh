@@ -36,11 +36,14 @@ rollback() {
     systemctl stop parsian-crm || true
   fi
 }
+supported_os() {
+  case "$1:$2" in ubuntu:22.04|ubuntu:24.04|ubuntu:26.04|debian:12|debian:13) return 0 ;; *) return 1 ;; esac
+}
 check_platform() {
   [[ -r /etc/os-release ]] || fail 'Cannot identify the operating system.'
   local ID='' VERSION_ID=''
   . /etc/os-release
-  case "$ID:$VERSION_ID" in ubuntu:22.04|ubuntu:24.04|debian:12|debian:13) ;; *) fail "Unsupported OS: $ID $VERSION_ID. No packages were installed." ;; esac
+  supported_os "$ID" "$VERSION_ID" || fail "Unsupported OS: $ID $VERSION_ID. No packages were installed."
   [[ -d /run/systemd/system ]] || fail 'A running systemd server is required.'
   case "$(uname -m)" in x86_64) ARCH=x64 ;; aarch64) ARCH=arm64 ;; *) fail 'Only x86_64 and arm64 are supported.' ;; esac
 }
