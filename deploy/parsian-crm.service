@@ -1,0 +1,25 @@
+[Unit]
+Description=Parsian CRM
+After=network.target
+
+[Service]
+Type=simple
+User=parsian-crm
+Group=parsian-crm
+WorkingDirectory=/opt/parsian-crm/current
+EnvironmentFile=/etc/parsian-crm/production.env
+ExecStart=/usr/bin/node /opt/parsian-crm/current/server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+StateDirectory=parsian-crm
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/parsian-crm
+
+[Install]
+WantedBy=multi-user.target
