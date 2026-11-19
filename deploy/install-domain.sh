@@ -80,6 +80,20 @@ install_missing_packages() {
     DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y "${missing[@]}"
   fi
 }
+fix_node_permissions() {
+  # Runtime code is public; database and environment files stay private.
+  local dir
+  [[ -f "$NODE" && ! -L "$NODE" ]] || fail 'Expected a regular Node executable in the CRM runtime.'
+  for dir in "$BASE" "$BASE/runtime" "$BASE/runtime/node" "$BASE/runtime/node/bin"; do
+    [[ -d "$dir" && ! -L "$dir" ]] || fail 'Unexpected CRM runtime directory layout.'
+    chmod 0755 "$dir"
+  done
+  chmod 0755 "$NODE"
+}
+check_service_runtime() {
+  log 'Checking Node execution as the CRM service user'
+  runuser -u parsian-crm -- "$NODE" -e "if(+process.versions.node.split('.')[0]<24)process.exit(1);require('node:sqlite');console.log('Service-user Node and SQLite check passed.')"
+}
 install_node() {
   # Isolate Node from runtimes used by any existing website.
   local filename expected
@@ -93,6 +107,7 @@ install_node() {
   install -d -m 755 "$BASE/runtime/node"
   tar -xJf "$WORK/$filename" --strip-components=1 -C "$BASE/runtime/node"
   NODE="$BASE/runtime/node/bin/node"
+  fix_node_permissions
   "$NODE" -e "if(+process.versions.node.split('.')[0]<24)process.exit(1);require('node:sqlite')"
 }
 bootstrap_manager() {
@@ -127,7 +142,7 @@ main() {
   WORK=$(mktemp -d /tmp/parsian-crm-install.XXXXXX)
   trap cleanup EXIT
   trap on_error ERR
-  local stamp backup email
+  local stamp backup
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   backup="/var/backups/parsian-crm/$stamp"
   install -d -m 700 "$backup"
@@ -184,14 +199,24 @@ ReadWritePaths=$STATE
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
+  check_service_runtime
+  finish_install "$backup"
+}
+finish_install() {
+  local backup="$1" email
   STARTED_SERVICE=1
+  systemctl reset-failed parsian-crm || true
   systemctl start parsian-crm
   local ready=0 attempt
   for attempt in {1..30}; do
-    if curl -fsS http://127.0.0.1:3000/api/session > "$WORK/session.json"; then ready=1;break;fi
+    if curl -fs --max-time 2 http://127.0.0.1:3000/api/session > "$WORK/session.json"; then ready=1;break;fi
     sleep 1
   done
-  [[ "$ready" == 1 ]] || fail 'App did not start; inspect journalctl -u parsian-crm.'
+  if [[ "$ready" != 1 ]]; then
+    systemctl status parsian-crm --no-pager -l || true
+    journalctl -u parsian-crm -n 50 --no-pager || true
+    fail 'App did not start. The service diagnostics are shown above.'
+  fi
   bootstrap_manager
   [[ -r /dev/tty ]] || fail 'Interactive console required for certificate contact email.'
   read -r -p 'Email for HTTPS certificate renewal notices: ' email </dev/tty
@@ -228,4 +253,41 @@ NGINX
   printf 'Verify access from your laptop. Cloud firewall rules and Cloudflare settings are managed separately.\n'
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
+resume_install() {
+  [[ $EUID -eq 0 ]] || fail 'Run with sudo from the target server console.'
+  check_platform
+  check_dns
+  NODE="$BASE/runtime/node/bin/node"
+  [[ -f /etc/systemd/system/parsian-crm.service ]] || fail 'No partial CRM service found. Resume did not change anything.'
+  [[ "$(readlink -f "$BASE/current")" == "$RELEASE" ]] || fail 'The active release differs from the reviewed version; inspect before resuming.'
+  grep -Fxq "ExecStart=$NODE $BASE/current/server.js" /etc/systemd/system/parsian-crm.service || fail 'Unexpected service command; inspect before resuming.'
+  grep -Fxq 'User=parsian-crm' /etc/systemd/system/parsian-crm.service || fail 'Unexpected service user.'
+  grep -Fxq "DB_PATH=$STATE/crm.sqlite" /etc/parsian-crm/production.env || fail 'Unexpected database path.'
+  [[ ! -e "$NGINX_SITE" && ! -e "$SITE_LINK" && ! -L "$SITE_LINK" ]] || fail 'A CRM web configuration already exists; inspect it before resuming.'
+  exec 9>/run/lock/parsian-crm-install.lock
+  flock -n 9 || fail 'Another CRM installation is running.'
+  WORK=$(mktemp -d /tmp/parsian-crm-resume.XXXXXX)
+  trap cleanup EXIT
+  trap on_error ERR
+  local stamp backup
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  backup="/var/backups/parsian-crm/resume-$stamp"
+  install -d -m 700 "$backup"
+  cp -a /etc/systemd/system/parsian-crm.service /etc/parsian-crm/production.env "$backup/"
+  [[ ! -d /etc/nginx ]] || cp -a /etc/nginx "$backup/nginx"
+  systemctl stop parsian-crm
+  fix_node_permissions
+  check_service_runtime
+  if [[ -f "$STATE/crm.sqlite" ]]; then
+    CRM_BACKUP_PATH="$backup/crm.sqlite" "$NODE" --input-type=module - <<'JS'
+import {DatabaseSync,backup} from 'node:sqlite';
+const db=new DatabaseSync('/var/lib/parsian-crm/crm.sqlite',{readOnly:true});await backup(db,process.env.CRM_BACKUP_PATH);db.close();
+JS
+  fi
+  systemctl daemon-reload
+  finish_install "$backup"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if [[ "${1:-}" == --resume ]]; then resume_install; else main "$@"; fi
+fi
